@@ -9,6 +9,7 @@ class AIContainer:
         # 개발 용이성 위해 비워둠, 추후 구현에 따라 로딩 시점 변환 가능
         self.vad = None
         self.stt = None
+        self.audio_emotion = None
         self.face_emotion = None
         self.llm = None
 

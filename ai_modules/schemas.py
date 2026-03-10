@@ -33,10 +33,10 @@ class FaceInput(BaseModel):
 # --- 4. LLM (상담 생성) ---
 class LLMContext(BaseModel):
     user_text: str
-    face_emotion: Optional[str] = None
-    voice_emotion: Optional[str] = None
+    face_emotions: List[EmotionResult] = []
+    voice_emotions: List[EmotionResult] = []
     text_emotion: Optional[str] = None
-    history: List[Dict[str, str]] = [] # [ {"content": "..."}, ...]
+    history: List[Dict[str, str]] = []  # [ {"content": "..."}, ...]
 
 class LLMResponse(BaseModel):
     reply_text: str
