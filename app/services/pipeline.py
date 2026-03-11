@@ -28,7 +28,7 @@ class CounselingPipeline:
         self._face_emotion_buffer[session_id] = []
         self._voice_emotion_buffer[session_id] = []
         self._stt_text_buffer[session_id] = []
-        logger.info(f"[Pipeline] 세션 초기화: {session_id}")
+        logger.info(f"세션 초기화: {session_id}")
 
     def cleanup_session(self, session_id: str) -> None:
         for buf in (
@@ -38,7 +38,7 @@ class CounselingPipeline:
             self._stt_text_buffer,
         ):
             buf.pop(session_id, None)
-        logger.info(f"[Pipeline] 세션 정리: {session_id}")
+        logger.info(f"세션 정리: {session_id}")
 
 
     # 오디오 청크 누적
@@ -47,7 +47,7 @@ class CounselingPipeline:
         """클라이언트에서 실시간으로 들어오는 오디오 청크를 버퍼에 누적."""
         self._audio_buffers[session_id].extend(chunk)
         total = len(self._audio_buffers[session_id])
-        logger.info(f"[Pipeline][Audio] {session_id}: +{len(chunk)}B (누적: {total}B)")
+        logger.info(f"[Audio] {session_id}: +{len(chunk)}B (누적: {total}B)")
 
     # 이미지 프레임 → 얼굴 감정 분석
 
@@ -57,7 +57,7 @@ class CounselingPipeline:
         result = self.container.face_emotion.analyze(face_input)
         self._face_emotion_buffer[session_id].append(result)
         logger.info(
-            f"[Pipeline][Face] {session_id}: "
+            f"[Face] {session_id}: "
             f"{result.primary_emotion} {result.probabilities}"
         )
         return result
@@ -71,22 +71,22 @@ class CounselingPipeline:
         """
         audio_data = bytes(self._audio_buffers[session_id])
         if not audio_data:
-            logger.warning(f"[Pipeline][SpeechEnd] {session_id}: 오디오 버퍼 비어있음, 건너뜀")
+            logger.warning(f"[SpeechEnd] {session_id}: 오디오 버퍼 비어있음, 건너뜀")
             return None
 
-        logger.info(f"[Pipeline][SpeechEnd] {session_id}: 버퍼 {len(audio_data)}B → 처리 시작")
+        logger.info(f"[SpeechEnd] {session_id}: 버퍼 {len(audio_data)}B → 처리 시작")
         stt_input = STTInput(audio_data=audio_data)
 
         # STT
         stt_result = self.container.stt.transcribe(stt_input)
         self._stt_text_buffer[session_id].append(stt_result.text)
-        logger.info(f"[Pipeline][STT] {session_id}: '{stt_result.text}'")
+        logger.info(f"[STT] {session_id}: '{stt_result.text}'")
 
         # 음성 감정
         voice_emotion = self.container.audio_emotion.analyze(stt_input)
         self._voice_emotion_buffer[session_id].append(voice_emotion)
         logger.info(
-            f"[Pipeline][VoiceEmotion] {session_id}: "
+            f"[VoiceEmotion] {session_id}: "
             f"{voice_emotion.primary_emotion} {voice_emotion.probabilities}"
         )
 
@@ -102,17 +102,17 @@ class CounselingPipeline:
         """
         accumulated_text = " ".join(self._stt_text_buffer.get(session_id, []))
         if not accumulated_text:
-            logger.warning(f"[Pipeline][Generate] {session_id}: 누적 텍스트 없음, 건너뜀")
+            logger.warning(f"[Generate] {session_id}: 누적 텍스트 없음, 건너뜀")
             return None
 
         face_emotions = self._face_emotion_buffer[session_id]
         voice_emotions = self._voice_emotion_buffer[session_id]
 
         logger.info(
-            f"[Pipeline][Generate] {session_id}: "
+            f"[Generate] {session_id}: "
             f"face {len(face_emotions)}건, voice {len(voice_emotions)}건 → AI 전달"
         )
-        logger.info(f"[Pipeline][Generate] {session_id}: 누적 텍스트='{accumulated_text}'")
+        logger.info(f"[Generate] {session_id}: 누적 텍스트='{accumulated_text}'")
 
         llm_context = LLMContext(
             user_text=accumulated_text,
@@ -120,13 +120,13 @@ class CounselingPipeline:
             voice_emotions=voice_emotions,
         )
         response = self.container.llm.generate_response(llm_context)
-        logger.info(f"[Pipeline][LLM] {session_id}: '{response.reply_text}'")
+        logger.info(f"[LLM] {session_id}: '{response.reply_text}'")
         if response.suggested_action:
-            logger.info(f"[Pipeline][LLM] 추천 행동: '{response.suggested_action}'")
+            logger.info(f"[LLM] 추천 행동: '{response.suggested_action}'")
 
         return response
 
 
 # 전역 인스턴스 (session_manager에서 import해서 사용)
-from app.core.container import ai_container  # noqa: E402
+from app.core.container import ai_container
 pipeline = CounselingPipeline(ai_container)
