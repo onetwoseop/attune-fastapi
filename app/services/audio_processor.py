@@ -9,9 +9,11 @@ from app.core.config import settings
 logger = logging.getLogger(__name__)
 
 SILENCE_THRESHOLD_SEC = settings.vad_silence_threshold
-VAD_SAMPLE_RATE = settings.vad_sample_rate
-VAD_CHUNK_SAMPLES = settings.vad_chunk_samples
-VAD_CHUNK_BYTES = VAD_CHUNK_SAMPLES * 4  # float32 = 4bytes
+VAD_SAMPLE_RATE       = settings.vad_sample_rate
+VAD_CHUNK_SAMPLES     = settings.vad_chunk_samples
+VAD_CHUNK_BYTES       = VAD_CHUNK_SAMPLES * 4  # float32 = 4bytes
+MIN_SPEECH_BYTES      = VAD_SAMPLE_RATE * 4 // 2  # 최소 발화 길이: 0.5초 (float32)
+PRE_ROLL_BYTES        = VAD_SAMPLE_RATE * 4 // 2  # pre-roll 버퍼: 0.5초 (float32)
 
 
 class AudioProcessor:
@@ -24,6 +26,8 @@ class AudioProcessor:
         self.container = container
         self._audio_buffers: Dict[str, bytearray] = {}
         self._vad_chunk_buffer: Dict[str, bytearray] = {}
+        self._pre_roll: Dict[str, bytearray] = {}       # 발화 시작 직전 0.5초 버퍼
+        self._is_speaking: Dict[str, bool] = {}         # 현재 발화 중 여부
         self._silence_samples: Dict[str, int] = {}
         self._stt_running: Dict[str, bool] = {}
         self._accumulated_text: Dict[str, str] = {}
@@ -34,6 +38,8 @@ class AudioProcessor:
     def init_session(self, session_id: str) -> None:
         self._audio_buffers[session_id] = bytearray()
         self._vad_chunk_buffer[session_id] = bytearray()
+        self._pre_roll[session_id] = bytearray()
+        self._is_speaking[session_id] = False
         self._silence_samples[session_id] = 0
         self._stt_running[session_id] = False
         self._accumulated_text[session_id] = ""
@@ -47,6 +53,8 @@ class AudioProcessor:
         for buf in (
             self._audio_buffers,
             self._vad_chunk_buffer,
+            self._pre_roll,
+            self._is_speaking,
             self._silence_samples,
             self._stt_running,
             self._accumulated_text,
@@ -88,13 +96,10 @@ class AudioProcessor:
         except asyncio.CancelledError:
             logger.info(f"[IncrSTT] {session_id}: 워커 종료")
 
-    # 오디오 청크 누적 + VAD 침묵 감지 → 침묵 시 STT 큐 등록
+    # 오디오 청크 누적 + VAD 음성/침묵 감지 → 음성 구간만 STT 버퍼에 누적, 침묵 시 STT 큐 등록
     def append_chunk(self, session_id: str, chunk: bytes) -> bool:
-        self._audio_buffers[session_id].extend(chunk)
-        total = len(self._audio_buffers[session_id])
-        logger.info(f"[Audio] {session_id}: +{len(chunk)}B (누적: {total}B)")
-
         self._vad_chunk_buffer[session_id].extend(chunk)
+
         while len(self._vad_chunk_buffer[session_id]) >= VAD_CHUNK_BYTES:
             vad_chunk = bytes(self._vad_chunk_buffer[session_id][:VAD_CHUNK_BYTES])
             self._vad_chunk_buffer[session_id] = self._vad_chunk_buffer[session_id][VAD_CHUNK_BYTES:]
@@ -103,23 +108,41 @@ class AudioProcessor:
 
             if vad_result.is_speech:
                 self._silence_samples[session_id] = 0
+                if not self._is_speaking[session_id]:
+                    # 발화 시작: pre-roll 버퍼를 먼저 붙여서 발화 첫 음절 손실 방지
+                    self._is_speaking[session_id] = True
+                    self._audio_buffers[session_id].extend(self._pre_roll[session_id])
+                    self._pre_roll[session_id].clear()
+                    logger.debug(f"[VAD] {session_id}: 발화 시작")
+                # 음성 구간 → STT 버퍼에 누적
+                self._audio_buffers[session_id].extend(vad_chunk)
             else:
-                self._silence_samples[session_id] += VAD_CHUNK_SAMPLES
-                silence_sec = self._silence_samples[session_id] / VAD_SAMPLE_RATE
-                if silence_sec >= SILENCE_THRESHOLD_SEC:
-                    self._silence_samples[session_id] = 0
-                    audio_snapshot = bytes(self._audio_buffers[session_id])
-                    if audio_snapshot and session_id in self._transcription_queue:
-                        self._last_audio_snapshot[session_id] = audio_snapshot
-                        self._audio_buffers[session_id].clear()
-                        try:
-                            self._transcription_queue[session_id].put_nowait(audio_snapshot)
-                            logger.info(f"[VAD] {session_id}: {silence_sec:.1f}초 침묵 → STT 큐 등록 ({len(audio_snapshot)}B)")
-                        except asyncio.QueueFull:
-                            logger.warning(f"[VAD] {session_id}: STT 큐 가득 참, 세그먼트 버림")
-                    return True  # 발화 종료 신호
+                # 침묵 구간 → pre-roll 버퍼에 유지 (최대 PRE_ROLL_BYTES)
+                self._pre_roll[session_id].extend(vad_chunk)
+                if len(self._pre_roll[session_id]) > PRE_ROLL_BYTES:
+                    self._pre_roll[session_id] = self._pre_roll[session_id][-PRE_ROLL_BYTES:]
 
-        return False  # 아직 발화 중
+                if self._is_speaking[session_id]:
+                    self._silence_samples[session_id] += VAD_CHUNK_SAMPLES
+                    silence_sec = self._silence_samples[session_id] / VAD_SAMPLE_RATE
+                    if silence_sec >= SILENCE_THRESHOLD_SEC:
+                        self._is_speaking[session_id] = False
+                        self._silence_samples[session_id] = 0
+                        audio_snapshot = bytes(self._audio_buffers[session_id])
+                        self._audio_buffers[session_id].clear()
+                        if audio_snapshot and session_id in self._transcription_queue:
+                            if len(audio_snapshot) < MIN_SPEECH_BYTES:
+                                logger.debug(f"[VAD] {session_id}: 세그먼트 너무 짧음 ({len(audio_snapshot)}B < {MIN_SPEECH_BYTES}B), 스킵")
+                            else:
+                                self._last_audio_snapshot[session_id] = audio_snapshot
+                                try:
+                                    self._transcription_queue[session_id].put_nowait(audio_snapshot)
+                                    logger.info(f"[VAD] {session_id}: {silence_sec:.1f}초 침묵 → STT 큐 등록 ({len(audio_snapshot)}B)")
+                                except asyncio.QueueFull:
+                                    logger.warning(f"[VAD] {session_id}: STT 큐 가득 참, 세그먼트 버림")
+                        return True  # 발화 종료 신호
+
+        return False  # 아직 발화 중 또는 침묵 대기
 
     # STT 큐 완료 대기 후 누적 텍스트 반환 (없으면 폴백 직접 STT)
     async def wait_and_get_text(self, session_id: str) -> Optional[str]:

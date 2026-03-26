@@ -19,7 +19,7 @@ class AIContainer:
         print(">>> AI 모델 로딩을 시작합니다.....")
         
         # VAD (음성 감지)
-        self.vad = SileroVADModel()
+        self.vad = SileroVADModel(speech_threshold=settings.vad_speech_threshold)
         self.vad.load_model()
 
         # STT (음성 -> 텍스트)

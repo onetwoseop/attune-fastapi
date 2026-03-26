@@ -95,6 +95,9 @@ class SileroVADModel(BaseVADModel):
     SAMPLE_RATE = 16000
     CHUNK_SAMPLES = 512  # Silero VAD 요구 chunk 크기 (32ms @ 16kHz)
 
+    def __init__(self, speech_threshold: float = 0.5):
+        self.speech_threshold = speech_threshold
+
     def load_model(self):
         import torch
         self.model, _ = torch.hub.load(
@@ -113,7 +116,7 @@ class SileroVADModel(BaseVADModel):
             audio_array = np.pad(audio_array, (0, self.CHUNK_SAMPLES - len(audio_array)))
         tensor = torch.from_numpy(audio_array[:self.CHUNK_SAMPLES])
         confidence = float(self.model(tensor, self.SAMPLE_RATE).item())
-        return VADOutput(is_speech=confidence >= 0.5, confidence=confidence)
+        return VADOutput(is_speech=confidence >= self.speech_threshold, confidence=confidence)
 
 
 # STT
