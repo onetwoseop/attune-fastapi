@@ -22,6 +22,7 @@ class ConnectionManager:
         await websocket.accept()
         self.active_connections[client_id] = websocket
         pipeline.init_session(client_id)
+        await pipeline.start_transcription_worker(client_id)
         # 연결 성공 로깅으로 바꿈
         logger.info(f"--- [Session] {client_id} 연결 (현재 접속자: {len(self.active_connections)}명)")
 
@@ -32,7 +33,7 @@ class ConnectionManager:
         )
 
     # 연결 해제 처리
-    def disconnect(self, client_id: str):
+    async def disconnect(self, client_id: str):
         if client_id in self.active_connections:
             del self.active_connections[client_id]
             pipeline.cleanup_session(client_id)
@@ -73,8 +74,26 @@ class ConnectionManager:
 
             # 타입별 처리 분기
 
+            # [초기 상담 설정 처리]
+            if input_obj.type == "setup":
+                d = input_obj.data
+                pipeline.setup_counseling(
+                    client_id,
+                    topic=d["topic"],
+                    mood=d["mood"],
+                    content=d["content"],
+                    style=d.get("style")
+                )
+                initial_response = pipeline.generate_initial_questions(client_id)
+                if initial_response:
+                    await self.send_personal_message(
+                        {"status": "initial_questions", "message": initial_response.reply_text},
+                        client_id
+                    )
+
             # [음성 데이터 처리]
-            if input_obj.type == "audio":
+            elif input_obj.type == "audio":
+                task = None
                 try:
                     base64_data = str(input_obj.data)
                     if "," in base64_data:
@@ -82,9 +101,12 @@ class ConnectionManager:
                     speech_ended = pipeline.append_audio_chunk(client_id, base64.b64decode(base64_data))
                     # VAD가 침묵을 감지하면 백그라운드에서 STT+LLM 처리
                     if speech_ended:
-                        asyncio.create_task(self._process_speech_end(client_id))
+                        # 백그라운드 stt 처리
+                        task = asyncio.create_task(self._process_speech_end(client_id))
                 except Exception as e:
                     logger.error(f"[Error] 오디오 처리 실패: {e}")
+                    if task is not None:
+                        task.cancel()
 
             # [이미지 데이터 처리]
             elif input_obj.type == "video":
@@ -118,6 +140,9 @@ class ConnectionManager:
                 logger.warning(f"[Session] 알 수 없는 타입: {input_obj.type}")
 
             # audio/video는 fire-and-forget (ACK 없음), control 신호만 ACK
+
+            
+
 
         except json.JSONDecodeError:
             logger.error(f"[Session] JSON 파싱 실패: {raw_data[:100]}")
